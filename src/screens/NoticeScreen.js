@@ -15,7 +15,7 @@ function NoticesTab() {
 
   const sharePdfOf = async (n) => {
     try {
-      await sharePdf(noticeHtml(n, getSettings()), { ...A4, title: 'নোটিশ' });
+      await sharePdf(noticeHtml(n, getSettings()), { ...A4, title: 'নোটিশ', fileName: 'notice' });
     } catch (e) {
       fail(e);
     }
@@ -94,7 +94,7 @@ function RulesTab() {
 
   const sharePdfRules = async () => {
     try {
-      await sharePdf(rulesHtml(building.name, rules), { ...A4, title: 'বাসার নিয়মাবলি' });
+      await sharePdf(rulesHtml(building.name, rules), { ...A4, title: 'বাসার নিয়মাবলি', fileName: 'rules' });
     } catch (e) {
       fail(e);
     }

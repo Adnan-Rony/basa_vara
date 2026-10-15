@@ -43,7 +43,7 @@ export default function RentScreen() {
     try {
       const data = getReceiptData(logId);
       if (!data) return;
-      await sharePdf(receiptHtml(data, getSettings()), { title: 'ভাড়ার রসিদ' });
+      await sharePdf(receiptHtml(data, getSettings()), { title: 'ভাড়ার রসিদ', fileName: 'receipt' });
     } catch (e) {
       Alert.alert('রসিদ বানানো যায়নি', String(e?.message || e));
     }

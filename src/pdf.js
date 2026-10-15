@@ -1,5 +1,6 @@
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
+import { File, Paths } from 'expo-file-system';
 import { monthLabel, showDate, taka, toBn } from './utils';
 import { takaInWords } from './words';
 
@@ -24,17 +25,38 @@ const BASE_CSS = `
   hr { border: 0; border-top: 1px dashed #9CA3AF; margin: 12px 0; }
 `;
 
-// Makes the PDF and opens the share sheet. Returns the file uri.
-export async function sharePdf(html, { width = 420, height = 595, title = 'PDF' } = {}) {
+// Expo Go-তে printToFileAsync-এর ফাইল শেয়ারের অনুমতি-পাওয়া ফোল্ডারে থাকে না।
+// তাই ফাইলটা অ্যাপের নিজের cache ফোল্ডারে কপি করে সেখান থেকে শেয়ার করা হয়।
+function copyToCache(uri, fileName) {
+  const safe = String(fileName || 'document').replace(/[^A-Za-z0-9_-]/g, '_');
+  const dest = new File(Paths.cache, `${safe}-${Date.now()}.pdf`);
+  if (dest.exists) dest.delete();
+  new File(uri).copy(dest);
+  return dest.uri;
+}
+
+// Makes the PDF and opens the share sheet. Returns the shared file uri.
+export async function sharePdf(
+  html,
+  { width = 420, height = 595, title = 'PDF', fileName = 'document' } = {}
+) {
   const { uri } = await Print.printToFileAsync({ html, width, height });
-  if (await Sharing.isAvailableAsync()) {
-    await Sharing.shareAsync(uri, {
-      mimeType: 'application/pdf',
-      UTI: 'com.adobe.pdf',
-      dialogTitle: title,
-    });
+  let shareUri = uri;
+  try {
+    shareUri = copyToCache(uri, fileName);
+  } catch (e) {
+    // কপি না হলে আগের uri-ই ব্যবহার হবে
+    shareUri = uri;
   }
-  return uri;
+  if (!(await Sharing.isAvailableAsync())) {
+    throw new Error('এই ফোনে শেয়ার সুবিধা পাওয়া যায়নি');
+  }
+  await Sharing.shareAsync(shareUri, {
+    mimeType: 'application/pdf',
+    UTI: 'com.adobe.pdf',
+    dialogTitle: title,
+  });
+  return shareUri;
 }
 
 export function receiptHtml(r, landlord = {}) {

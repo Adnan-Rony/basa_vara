@@ -16,6 +16,7 @@ import UnitScreen from './src/screens/UnitScreen';
 import UnitForm from './src/screens/UnitForm';
 import BulkUnits from './src/screens/BulkUnits';
 import TenantForm from './src/screens/TenantForm';
+import ExpenseScreen from './src/screens/ExpenseScreen';
 import NoticeScreen from './src/screens/NoticeScreen';
 import NoticeForm from './src/screens/NoticeForm';
 import SettingsScreen from './src/screens/SettingsScreen';
@@ -43,6 +44,7 @@ function TabBar({ tab, setTab }) {
   const items = [
     ['home', '🏠', 'বাড়ি'],
     ['rent', '💰', 'ভাড়া'],
+    ['expense', '📒', 'খরচ'],
     ['notice', '📢', 'নোটিশ'],
   ];
   return (
@@ -119,7 +121,15 @@ function Root() {
           <Screen key={stack.length + top.name} {...top.params} />
         ) : (
           <>
-            <View style={{ flex: 1 }}>{tab === 'home' ? <HomeScreen /> : tab === 'rent' ? <RentScreen /> : <NoticeScreen />}</View>
+            <View style={{ flex: 1 }}>{tab === 'home' ? (
+                <HomeScreen />
+              ) : tab === 'rent' ? (
+                <RentScreen />
+              ) : tab === 'expense' ? (
+                <ExpenseScreen />
+              ) : (
+                <NoticeScreen />
+              )}</View>
             <TabBar tab={tab} setTab={setTab} />
           </>
         )}

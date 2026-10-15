@@ -48,6 +48,14 @@ export function initDb() {
       amount REAL NOT NULL,
       paid_date TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS expenses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      amount REAL NOT NULL,
+      category TEXT NOT NULL DEFAULT 'অন্যান্য',
+      expense_date TEXT NOT NULL,
+      note TEXT DEFAULT ''
+    );
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL DEFAULT ''
@@ -328,6 +336,120 @@ export function addRule(buildingId, text) {
 }
 
 export const deleteRule = (id) => db.runSync('DELETE FROM rules WHERE id = ?', [id]);
+
+
+
+// ---------- Simple Expense Manager ----------
+export const getExpenses = () =>
+  db.getAllSync('SELECT * FROM expenses ORDER BY expense_date DESC, id DESC');
+
+export const addExpense = ({ title, amount, category, expenseDate, note }) =>
+  db.runSync(
+    'INSERT INTO expenses (title, amount, category, expense_date, note) VALUES (?, ?, ?, ?, ?)',
+    [title, amount, category || 'অন্যান্য', expenseDate, note || '']
+  ).lastInsertRowId;
+
+export const deleteExpense = (id) => db.runSync('DELETE FROM expenses WHERE id = ?', [id]);
+
+// ---------- Backup & Restore ----------
+// Keep this list in dependency order (parents before children).
+const BACKUP_TABLES = [
+  'buildings',
+  'expenses',
+  'units',
+  'tenants',
+  'payments',
+  'payment_log',
+  'settings',
+  'notices',
+  'rules',
+];
+const BACKUP_FORMAT = 'barivara-sqlite-backup';
+const BACKUP_VERSION = 1;
+
+export function createBackupObject() {
+  const tables = {};
+  for (const table of BACKUP_TABLES) {
+    // Table names come only from the constant allowlist above.
+    tables[table] = db.getAllSync(`SELECT * FROM "${table}"`);
+  }
+  return {
+    format: BACKUP_FORMAT,
+    version: BACKUP_VERSION,
+    createdAt: new Date().toISOString(),
+    app: 'বাড়িভাড়া ম্যানেজার',
+    tables,
+  };
+}
+
+export function validateBackupObject(backup) {
+  if (!backup || typeof backup !== 'object' || Array.isArray(backup)) {
+    throw new Error('ব্যাকআপ ফাইলটি সঠিক JSON নয়।');
+  }
+  if (backup.format !== BACKUP_FORMAT) {
+    throw new Error('এটি বাড়িভাড়া ম্যানেজারের ব্যাকআপ ফাইল নয়।');
+  }
+  if (backup.version !== BACKUP_VERSION) {
+    throw new Error(`এই ব্যাকআপের সংস্করণ (${backup.version}) সমর্থিত নয়।`);
+  }
+  if (!backup.tables || typeof backup.tables !== 'object' || Array.isArray(backup.tables)) {
+    throw new Error('ব্যাকআপে ডেটাবেসের তথ্য পাওয়া যায়নি।');
+  }
+
+  for (const table of BACKUP_TABLES) {
+    // Older version-1 backups did not include expenses; treat those as empty.
+    if (table === 'expenses' && backup.tables[table] === undefined) continue;
+    if (!Array.isArray(backup.tables[table])) {
+      throw new Error(`ব্যাকআপে ${table} টেবিলের তথ্য নেই বা ভুল।`);
+    }
+    const columns = db.getAllSync(`PRAGMA table_info("${table}")`).map((c) => c.name);
+    for (const row of backup.tables[table]) {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) {
+        throw new Error(`${table} টেবিলে ভুল রেকর্ড পাওয়া গেছে।`);
+      }
+      for (const key of Object.keys(row)) {
+        if (!columns.includes(key)) {
+          throw new Error(`${table} টেবিলে অচেনা কলাম পাওয়া গেছে: ${key}`);
+        }
+      }
+    }
+  }
+  return true;
+}
+
+export function restoreBackupObject(backup) {
+  validateBackupObject(backup);
+
+  const deleteOrder = [...BACKUP_TABLES].reverse();
+  db.withTransactionSync(() => {
+    // Delete child records first so foreign-key constraints remain satisfied.
+    for (const table of deleteOrder) db.runSync(`DELETE FROM "${table}"`);
+
+    for (const table of BACKUP_TABLES) {
+      const rows = backup.tables[table] || [];
+      if (!rows.length) continue;
+      const validColumns = db.getAllSync(`PRAGMA table_info("${table}")`).map((c) => c.name);
+      for (const row of rows) {
+        const columns = Object.keys(row);
+        if (!columns.length || columns.some((column) => !validColumns.includes(column))) {
+          throw new Error(`ব্যাকআপের ${table} রেকর্ড যাচাই করা যায়নি।`);
+        }
+        const quoted = columns.map((column) => `"${column}"`).join(', ');
+        const placeholders = columns.map(() => '?').join(', ');
+        db.runSync(
+          `INSERT INTO "${table}" (${quoted}) VALUES (${placeholders})`,
+          columns.map((column) => row[column])
+        );
+      }
+    }
+
+    const fkErrors = db.getAllSync('PRAGMA foreign_key_check');
+    if (fkErrors.length) {
+      throw new Error('ব্যাকআপে অসম্পূর্ণ সম্পর্ক আছে। বর্তমান ডেটা পরিবর্তন করা হয়নি।');
+    }
+  });
+  return true;
+}
 
 // ---------- Dashboard ----------
 export function getStats(month) {
