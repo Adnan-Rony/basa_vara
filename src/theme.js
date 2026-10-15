@@ -1,0 +1,17 @@
+export const C = {
+  primary: '#0F766E',
+  primaryDark: '#115E59',
+  bg: '#F3F5F7',
+  card: '#FFFFFF',
+  text: '#111827',
+  sub: '#6B7280',
+  line: '#E5E7EB',
+  danger: '#DC2626',
+  dangerBg: '#FEE2E2',
+  warn: '#B45309',
+  warnBg: '#FEF3C7',
+  ok: '#15803D',
+  okBg: '#DCFCE7',
+  info: '#1D4ED8',
+  infoBg: '#DBEAFE',
+};

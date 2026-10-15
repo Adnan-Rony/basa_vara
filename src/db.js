@@ -1,0 +1,351 @@
+import * as SQLite from 'expo-sqlite';
+import { todayISO } from './utils';
+
+const db = SQLite.openDatabaseSync('barivara.db');
+
+export function initDb() {
+  db.execSync(`
+    PRAGMA foreign_keys = ON;
+    CREATE TABLE IF NOT EXISTS buildings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      address TEXT DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS units (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      building_id INTEGER NOT NULL REFERENCES buildings(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      rent REAL NOT NULL DEFAULT 0,
+      service_charge REAL NOT NULL DEFAULT 0,
+      note TEXT DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS tenants (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      unit_id INTEGER NOT NULL REFERENCES units(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      phone TEXT DEFAULT '',
+      members INTEGER NOT NULL DEFAULT 1,
+      type TEXT DEFAULT 'family',
+      move_in TEXT,
+      move_out TEXT,
+      advance REAL DEFAULT 0,
+      note TEXT DEFAULT '',
+      active INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE TABLE IF NOT EXISTS payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      month TEXT NOT NULL,
+      due REAL NOT NULL,
+      paid REAL NOT NULL DEFAULT 0,
+      paid_date TEXT,
+      UNIQUE (tenant_id, month)
+    );
+    CREATE TABLE IF NOT EXISTS payment_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      month TEXT NOT NULL,
+      amount REAL NOT NULL,
+      paid_date TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS notices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      building_id INTEGER REFERENCES buildings(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      body TEXT DEFAULT '',
+      created TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      building_id INTEGER NOT NULL REFERENCES buildings(id) ON DELETE CASCADE,
+      text TEXT NOT NULL,
+      sort INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_units_building ON units(building_id);
+    CREATE INDEX IF NOT EXISTS idx_tenants_unit ON tenants(unit_id);
+  `);
+}
+
+// ---------- Buildings ----------
+export function getBuildings() {
+  return db.getAllSync(`
+    SELECT b.*,
+      (SELECT COUNT(*) FROM units u WHERE u.building_id = b.id) AS unit_count,
+      (SELECT COUNT(DISTINCT t.unit_id) FROM tenants t
+        JOIN units u ON u.id = t.unit_id
+        WHERE u.building_id = b.id AND t.active = 1) AS occupied
+    FROM buildings b ORDER BY b.name
+  `);
+}
+
+export const getBuilding = (id) =>
+  db.getFirstSync('SELECT * FROM buildings WHERE id = ?', [id]);
+
+export function saveBuilding({ id, name, address }) {
+  if (id) {
+    db.runSync('UPDATE buildings SET name = ?, address = ? WHERE id = ?', [name, address, id]);
+    return id;
+  }
+  return db.runSync('INSERT INTO buildings (name, address) VALUES (?, ?)', [name, address])
+    .lastInsertRowId;
+}
+
+export const deleteBuilding = (id) => db.runSync('DELETE FROM buildings WHERE id = ?', [id]);
+
+// ---------- Units ----------
+export function getUnits(buildingId) {
+  return db.getAllSync(
+    `SELECT u.*, t.id AS tenant_id, t.name AS tenant_name, t.members AS tenant_members
+     FROM units u
+     LEFT JOIN tenants t ON t.unit_id = u.id AND t.active = 1
+     WHERE u.building_id = ?
+     ORDER BY u.name`,
+    [buildingId]
+  );
+}
+
+export const getUnit = (id) => db.getFirstSync('SELECT * FROM units WHERE id = ?', [id]);
+
+export function saveUnit({ id, buildingId, name, rent, serviceCharge, note }) {
+  if (id) {
+    db.runSync(
+      'UPDATE units SET name = ?, rent = ?, service_charge = ?, note = ? WHERE id = ?',
+      [name, rent, serviceCharge, note, id]
+    );
+    return id;
+  }
+  return db.runSync(
+    'INSERT INTO units (building_id, name, rent, service_charge, note) VALUES (?, ?, ?, ?, ?)',
+    [buildingId, name, rent, serviceCharge, note]
+  ).lastInsertRowId;
+}
+
+export function addUnitsBulk(buildingId, names, rent, serviceCharge) {
+  db.withTransactionSync(() => {
+    for (const name of names) {
+      db.runSync(
+        'INSERT INTO units (building_id, name, rent, service_charge, note) VALUES (?, ?, ?, ?, ?)',
+        [buildingId, name, rent, serviceCharge, '']
+      );
+    }
+  });
+}
+
+export const deleteUnit = (id) => db.runSync('DELETE FROM units WHERE id = ?', [id]);
+
+// ---------- Tenants ----------
+export const getActiveTenant = (unitId) =>
+  db.getFirstSync('SELECT * FROM tenants WHERE unit_id = ? AND active = 1', [unitId]);
+
+export const getPastTenants = (unitId) =>
+  db.getAllSync(
+    'SELECT * FROM tenants WHERE unit_id = ? AND active = 0 ORDER BY move_out DESC',
+    [unitId]
+  );
+
+export const getTenant = (id) => db.getFirstSync('SELECT * FROM tenants WHERE id = ?', [id]);
+
+export function saveTenant({ id, unitId, name, phone, members, type, moveIn, advance, note }) {
+  if (id) {
+    db.runSync(
+      `UPDATE tenants SET name = ?, phone = ?, members = ?, type = ?, move_in = ?,
+         advance = ?, note = ? WHERE id = ?`,
+      [name, phone, members, type, moveIn, advance, note, id]
+    );
+    return id;
+  }
+  return db.runSync(
+    `INSERT INTO tenants (unit_id, name, phone, members, type, move_in, advance, note, active)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+    [unitId, name, phone, members, type, moveIn, advance, note]
+  ).lastInsertRowId;
+}
+
+export const endTenancy = (id) =>
+  db.runSync('UPDATE tenants SET active = 0, move_out = ? WHERE id = ?', [todayISO(), id]);
+
+export const getTenantPayments = (tenantId) =>
+  db.getAllSync('SELECT * FROM payments WHERE tenant_id = ? ORDER BY month DESC', [tenantId]);
+
+// ---------- Rent ----------
+// One row per tenant who was living in the building during `month`.
+export function getRentRows(month) {
+  const rows = db.getAllSync(
+    `SELECT t.id AS tenant_id, t.name, t.phone, t.members,
+            u.id AS unit_id, u.name AS unit_name, b.name AS building_name,
+            COALESCE(p.due, u.rent + u.service_charge) AS due,
+            COALESCE(p.paid, 0) AS paid
+     FROM tenants t
+     JOIN units u ON u.id = t.unit_id
+     JOIN buildings b ON b.id = u.building_id
+     LEFT JOIN payments p ON p.tenant_id = t.id AND p.month = ?
+     WHERE (t.active = 1 OR substr(t.move_out, 1, 7) >= ?)
+       AND (t.move_in IS NULL OR substr(t.move_in, 1, 7) <= ?)
+     ORDER BY b.name, u.name`,
+    [month, month, month]
+  );
+  return rows.map((r) => ({ ...r, remaining: Math.max(0, r.due - r.paid) }));
+}
+
+export function addPayment(tenantId, month, defaultDue, amount) {
+  let logId = 0;
+  db.withTransactionSync(() => {
+    logId = addPaymentInner(tenantId, month, defaultDue, amount);
+  });
+  return logId;
+}
+
+function addPaymentInner(tenantId, month, defaultDue, amount) {
+  const row = db.getFirstSync('SELECT * FROM payments WHERE tenant_id = ? AND month = ?', [
+    tenantId,
+    month,
+  ]);
+  if (row) {
+    db.runSync('UPDATE payments SET paid = paid + ?, paid_date = ? WHERE id = ?', [
+      amount,
+      todayISO(),
+      row.id,
+    ]);
+  } else {
+    db.runSync(
+      'INSERT INTO payments (tenant_id, month, due, paid, paid_date) VALUES (?, ?, ?, ?, ?)',
+      [tenantId, month, defaultDue, amount, todayISO()]
+    );
+  }
+  return db.runSync(
+    'INSERT INTO payment_log (tenant_id, month, amount, paid_date) VALUES (?, ?, ?, ?)',
+    [tenantId, month, amount, todayISO()]
+  ).lastInsertRowId;
+}
+
+export function resetPayment(tenantId, month) {
+  db.withTransactionSync(() => {
+    db.runSync('DELETE FROM payments WHERE tenant_id = ? AND month = ?', [tenantId, month]);
+    db.runSync('DELETE FROM payment_log WHERE tenant_id = ? AND month = ?', [tenantId, month]);
+  });
+}
+
+export const getPaymentLog = (tenantId, month) =>
+  db.getAllSync(
+    'SELECT * FROM payment_log WHERE tenant_id = ? AND month = ? ORDER BY id',
+    [tenantId, month]
+  );
+
+// Everything a receipt needs for one logged payment.
+export function getReceiptData(logId) {
+  const log = db.getFirstSync('SELECT * FROM payment_log WHERE id = ?', [logId]);
+  if (!log) return null;
+  const info = db.getFirstSync(
+    `SELECT t.name AS tenant_name, t.phone, u.name AS unit_name,
+            b.name AS building_name, b.address AS building_address, p.due AS due
+     FROM tenants t
+     JOIN units u ON u.id = t.unit_id
+     JOIN buildings b ON b.id = u.building_id
+     LEFT JOIN payments p ON p.tenant_id = t.id AND p.month = ?
+     WHERE t.id = ?`,
+    [log.month, log.tenant_id]
+  );
+  const upTo = db.getFirstSync(
+    'SELECT COALESCE(SUM(amount), 0) AS s FROM payment_log WHERE tenant_id = ? AND month = ? AND id <= ?',
+    [log.tenant_id, log.month, logId]
+  ).s;
+  const due = info.due ?? 0;
+  return {
+    ...info,
+    receiptNo: log.id,
+    month: log.month,
+    amount: log.amount,
+    paidDate: log.paid_date,
+    totalPaid: upTo,
+    due,
+    remaining: Math.max(0, due - upTo),
+  };
+}
+
+// ---------- Settings ----------
+export function getSettings() {
+  const out = {};
+  for (const r of db.getAllSync('SELECT key, value FROM settings')) out[r.key] = r.value;
+  return out;
+}
+
+export function setSetting(key, value) {
+  db.runSync(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+    [key, value]
+  );
+}
+
+// ---------- Notices ----------
+// buildingId null => সব বিল্ডিংয়ের জন্য
+export const getNotices = () =>
+  db.getAllSync(
+    `SELECT n.*, b.name AS building_name FROM notices n
+     LEFT JOIN buildings b ON b.id = n.building_id
+     ORDER BY n.created DESC, n.id DESC`
+  );
+
+export const getNotice = (id) => db.getFirstSync('SELECT * FROM notices WHERE id = ?', [id]);
+
+export function saveNotice({ id, buildingId, title, body }) {
+  if (id) {
+    db.runSync('UPDATE notices SET building_id = ?, title = ?, body = ? WHERE id = ?', [
+      buildingId,
+      title,
+      body,
+      id,
+    ]);
+    return id;
+  }
+  return db.runSync('INSERT INTO notices (building_id, title, body, created) VALUES (?, ?, ?, ?)', [
+    buildingId,
+    title,
+    body,
+    todayISO(),
+  ]).lastInsertRowId;
+}
+
+export const deleteNotice = (id) => db.runSync('DELETE FROM notices WHERE id = ?', [id]);
+
+// ---------- House rules ----------
+export const getRules = (buildingId) =>
+  db.getAllSync('SELECT * FROM rules WHERE building_id = ? ORDER BY sort, id', [buildingId]);
+
+export function addRule(buildingId, text) {
+  const next =
+    db.getFirstSync('SELECT COALESCE(MAX(sort), 0) + 1 AS n FROM rules WHERE building_id = ?', [
+      buildingId,
+    ]).n;
+  db.runSync('INSERT INTO rules (building_id, text, sort) VALUES (?, ?, ?)', [
+    buildingId,
+    text,
+    next,
+  ]);
+}
+
+export const deleteRule = (id) => db.runSync('DELETE FROM rules WHERE id = ?', [id]);
+
+// ---------- Dashboard ----------
+export function getStats(month) {
+  const units = db.getFirstSync('SELECT COUNT(*) AS c FROM units').c;
+  const occ = db.getFirstSync(
+    'SELECT COUNT(DISTINCT unit_id) AS c, COALESCE(SUM(members), 0) AS m FROM tenants WHERE active = 1'
+  );
+  const rows = getRentRows(month);
+  const expected = rows.reduce((s, r) => s + r.due, 0);
+  const collected = rows.reduce((s, r) => s + Math.min(r.paid, r.due), 0);
+  return {
+    units,
+    occupied: occ.c,
+    vacant: Math.max(0, units - occ.c),
+    members: occ.m,
+    expected,
+    collected,
+    due: Math.max(0, expected - collected),
+    dueCount: rows.filter((r) => r.remaining > 0).length,
+  };
+}
