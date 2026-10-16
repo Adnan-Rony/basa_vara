@@ -1,11 +1,12 @@
 import React, { useMemo, useState } from 'react';
-import { Alert, Linking, Modal, Pressable, Text, View } from 'react-native';
+import { KeyboardAvoidingView, Linking, Modal, Platform, Pressable, ScrollView, View } from 'react-native';
+import { Alert, Text } from '../i18n';
 import Screen from '../Screen';
-import { Badge, Btn, Card, Chip, Empty, Field, useNav } from '../ui';
+import { AppIcon, Badge, Btn, Card, Chip, Empty, Field, HeaderAction, useNav } from '../ui';
 import { addPayment, getPaymentLog, getReceiptData, getRentRows, getSettings, resetPayment } from '../db';
-import { receiptHtml, sharePdf } from '../pdf';
+import { receiptHtml, savePdf, sharePdf } from '../pdf';
 import { C } from '../theme';
-import { monthLabel, normalizePhone, parseNum, shiftMonth, showDate, taka, toBn } from '../utils';
+import { monthLabel, normalizePhone, parseNum, shiftMonth, showDate, smsUrl, taka, toBn } from '../utils';
 
 const statusOf = (r) => {
   if (r.due <= 0 || r.remaining <= 0) return { text: 'পরিশোধিত', kind: 'ok' };
@@ -39,11 +40,17 @@ export default function RentScreen() {
     [sel, nav.version, month]
   );
 
-  const receipt = async (logId) => {
+  const receipt = async (logId, toPhone = false) => {
     try {
       const data = getReceiptData(logId);
       if (!data) return;
-      await sharePdf(receiptHtml(data, getSettings()), { title: 'ভাড়ার রসিদ', fileName: 'receipt' });
+      const html = receiptHtml(data, getSettings());
+      if (toPhone) {
+        const res = await savePdf(html, { title: 'ভাড়ার রসিদ', fileName: 'receipt' });
+        if (res) Alert.alert('রসিদ সেভ হয়েছে', res.folder ? `ফোল্ডার: ${res.folder}` : undefined);
+      } else {
+        await sharePdf(html, { title: 'ভাড়ার রসিদ', fileName: 'receipt' });
+      }
     } catch (e) {
       Alert.alert('রসিদ বানানো যায়নি', String(e?.message || e));
     }
@@ -55,13 +62,20 @@ export default function RentScreen() {
       Alert.alert('টাকার অঙ্ক দিন', 'কত টাকা পেয়েছেন তা লিখুন।');
       return;
     }
+    const extra = n > sel.remaining ? n - sel.remaining : 0;
     const logId = addPayment(sel.tenant_id, month, sel.due, n);
     nav.bump();
     setSel(null);
-    Alert.alert('সংরক্ষণ হয়েছে', `${taka(n)} জমা হয়েছে। রসিদ দেবেন?`, [
-      { text: 'পরে', style: 'cancel' },
-      { text: 'রসিদ দিন', onPress: () => receipt(logId) },
-    ]);
+    Alert.alert(
+      'সংরক্ষণ হয়েছে',
+      `${taka(n)} জমা হয়েছে।` +
+        (extra > 0 ? ` বাড়তি ${taka(extra)} পরের মাসের ভাড়ায় অগ্রিম জমা হয়েছে।` : '') +
+        ' রসিদ দেবেন?',
+      [
+        { text: 'পরে', style: 'cancel' },
+        { text: 'রসিদ দিন', onPress: () => receipt(logId) },
+      ]
+    );
   };
 
   const clear = () => {
@@ -92,7 +106,7 @@ export default function RentScreen() {
   };
 
   return (
-    <Screen title="মাসিক ভাড়া">
+    <Screen title="মাসিক ভাড়া" right={<HeaderAction label="সব বকেয়া" onPress={() => nav.push('arrears')} />}>
       <View
         style={{
           flexDirection: 'row',
@@ -160,26 +174,32 @@ export default function RentScreen() {
         })
       )}
 
-      <Modal visible={!!sel} transparent animationType="fade" onRequestClose={() => setSel(null)}>
-        <View
-          style={{
-            flex: 1,
-            backgroundColor: 'rgba(0,0,0,0.45)',
-            justifyContent: 'center',
-            padding: 20,
-          }}
-        >
+      <Modal visible={!!sel} transparent animationType="slide" onRequestClose={() => setSel(null)}>
+        <KeyboardAvoidingView style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: C.overlay }} behavior="padding">
+          <Pressable style={{ flex: 1 }} onPress={() => setSel(null)} />
           {sel && (
-            <View style={{ backgroundColor: '#fff', borderRadius: 16, padding: 18 }}>
-              <Text style={{ fontSize: 18, fontWeight: '800', color: C.text }}>{sel.name}</Text>
-              <Text style={{ color: C.sub, marginBottom: 12 }}>
-                {sel.building_name} · {sel.unit_name} · {monthLabel(month)}
-              </Text>
-              <Text style={{ color: C.text, marginBottom: 2 }}>ভাড়া: {taka(sel.due)}</Text>
-              <Text style={{ color: C.text, marginBottom: 2 }}>এ পর্যন্ত পেয়েছি: {taka(sel.paid)}</Text>
-              <Text style={{ color: C.danger, fontWeight: '700', marginBottom: 12 }}>
-                বাকি: {taka(sel.remaining)}
-              </Text>
+            <View style={{ backgroundColor: C.card, borderTopLeftRadius: 30, borderTopRightRadius: 30, maxHeight: '88%', borderWidth: 1, borderBottomWidth: 0, borderColor: C.line }}>
+              <View style={{ alignSelf: 'center', width: 40, height: 4, borderRadius: 4, backgroundColor: C.line, marginTop: 10 }} />
+              <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 20, paddingBottom: 28 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 16 }}>
+                <View style={{ width: 46, height: 46, borderRadius: 16, backgroundColor: C.primarySoft, borderWidth: 1, borderColor: C.line, alignItems: 'center', justifyContent: 'center', marginRight: 12 }}>
+                  <AppIcon name="users" size={21} color={C.primary} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 18, fontWeight: '800', color: C.text }}>{sel.name}</Text>
+                  <Text style={{ color: C.sub, marginTop: 2, fontSize: 13 }}>
+                    {sel.building_name} · {sel.unit_name} · {monthLabel(month)}
+                  </Text>
+                </View>
+              </View>
+              <View style={{ flexDirection: 'row', backgroundColor: C.surface, borderRadius: 18, padding: 14, marginBottom: 16 }}>
+                {[['ভাড়া', taka(sel.due), C.text], ['পেয়েছি', taka(sel.paid), C.ok], ['বাকি', taka(sel.remaining), C.danger]].map(([l, v, c], i) => (
+                  <View key={l} style={{ flex: 1, paddingLeft: i ? 12 : 0, borderLeftWidth: i ? 1 : 0, borderLeftColor: C.line }}>
+                    <Text style={{ color: C.sub, fontSize: 12, fontWeight: '600' }}>{l}</Text>
+                    <Text style={{ color: c, fontSize: 16, fontWeight: '800', marginTop: 3 }}>{v}</Text>
+                  </View>
+                ))}
+              </View>
               <Field
                 label="এখন কত টাকা পেয়েছেন?"
                 value={amount}
@@ -190,7 +210,7 @@ export default function RentScreen() {
               <Btn title="সংরক্ষণ করুন" onPress={save} />
               {log.length > 0 && (
                 <View style={{ marginTop: 12 }}>
-                  <Text style={{ color: C.sub, fontSize: 13, fontWeight: '700', marginBottom: 4 }}>
+                  <Text style={{ color: C.accent, fontSize: 12, fontWeight: '800', letterSpacing: 0.6, marginBottom: 8 }}>
                     এই মাসের পেমেন্ট
                   </Text>
                   {log.map((l) => (
@@ -200,13 +220,30 @@ export default function RentScreen() {
                         flexDirection: 'row',
                         alignItems: 'center',
                         justifyContent: 'space-between',
-                        paddingVertical: 4,
+                        paddingVertical: 10,
+                        paddingHorizontal: 12,
+                        marginBottom: 8,
+                        borderRadius: 16,
+                        borderWidth: 1,
+                        borderColor: C.line,
+                        backgroundColor: C.surface,
                       }}
                     >
-                      <Text style={{ color: C.text }}>
-                        {showDate(l.paid_date)} · {taka(l.amount)}
-                      </Text>
-                      <Btn small kind="ghost" title="রসিদ" onPress={() => receipt(l.id)} />
+                      <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                        <View style={{ width: 34, height: 34, borderRadius: 11, backgroundColor: C.card, borderWidth: 1, borderColor: C.line, alignItems: 'center', justifyContent: 'center', marginRight: 10 }}>
+                          <AppIcon name="bill" size={17} color={C.accent} />
+                        </View>
+                        <View>
+                          <Text style={{ color: C.text, fontWeight: '800' }}>{taka(l.amount)}</Text>
+                          <Text style={{ color: C.sub, fontSize: 12, marginTop: 1 }}>{showDate(l.paid_date)}</Text>
+                        </View>
+                      </View>
+                      <View style={{ flexDirection: 'row', gap: 6 }}>
+                        <Btn small kind="ghost" title="রসিদ" onPress={() => receipt(l.id)} />
+                        {Platform.OS === 'android' && (
+                          <Btn small kind="ghost" title="সেভ" onPress={() => receipt(l.id, true)} />
+                        )}
+                      </View>
                     </View>
                   ))}
                 </View>
@@ -219,7 +256,7 @@ export default function RentScreen() {
                     style={{ flex: 1 }}
                     title="SMS রিমাইন্ডার"
                     onPress={() =>
-                      send(`sms:${sel.phone}?body=${encodeURIComponent(message(sel))}`)
+                      send(smsUrl(sel.phone, message(sel)))
                     }
                   />
                   <Btn
@@ -249,9 +286,10 @@ export default function RentScreen() {
               <Pressable onPress={() => setSel(null)} style={{ alignItems: 'center', marginTop: 14 }}>
                 <Text style={{ color: C.sub, fontWeight: '600' }}>বাতিল</Text>
               </Pressable>
+              </ScrollView>
             </View>
           )}
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </Screen>
   );

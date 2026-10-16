@@ -1,12 +1,16 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Pressable, Share, Text, View } from 'react-native';
+import { Linking, Platform, Pressable, Share, View } from 'react-native';
+import { Alert, Text } from '../i18n';
 import Screen from '../Screen';
 import { Badge, Btn, Card, Chip, Empty, Field, HeaderAction, SectionTitle, useNav } from '../ui';
-import { addRule, deleteRule, getBuildings, getNotices, getRules, getSettings } from '../db';
-import { A4, noticeHtml, rulesHtml, sharePdf } from '../pdf';
+import { addRule, deleteRule, getBuildings, getNotices, getRules, getSettings, getTenantPhones } from '../db';
+import { A4, noticeHtml, rulesHtml, savePdf, sharePdf } from '../pdf';
 import { C } from '../theme';
-import { showDate, toBn } from '../utils';
+import { showDate, smsUrl, toBn } from '../utils';
 
+const saved = (res) => {
+  if (res) Alert.alert('PDF সেভ হয়েছে', res.folder ? `ফোল্ডার: ${res.folder}` : undefined);
+};
 const fail = (e) => Alert.alert('PDF বানানো যায়নি', String(e?.message || e));
 
 function NoticesTab() {
@@ -20,8 +24,25 @@ function NoticesTab() {
       fail(e);
     }
   };
+  const savePdfOf = async (n) => {
+    try {
+      saved(await savePdf(noticeHtml(n, getSettings()), { ...A4, title: 'নোটিশ', fileName: 'notice' }));
+    } catch (e) {
+      fail(e);
+    }
+  };
   const shareText = (n) =>
     Share.share({ message: `📢 ${n.title}\n\n${n.body}\n\n— ${getSettings().name || 'বাড়িওয়ালা'}` });
+
+  const smsAll = async (n) => {
+    const phones = getTenantPhones(n.building_id);
+    if (phones.length === 0) return Alert.alert('ফোন নম্বর নেই', 'এই নোটিশের জন্য কোনো ভাড়াটিয়ার ফোন নম্বর পাওয়া যায়নি।');
+    try {
+      await Linking.openURL(smsUrl(phones, `📢 ${n.title}\n\n${n.body}\n\n— ${getSettings().name || 'বাড়িওয়ালা'}`));
+    } catch (e) {
+      Alert.alert('খোলা যায়নি', 'মেসেজ অ্যাপ পাওয়া যায়নি।');
+    }
+  };
 
   return (
     <>
@@ -48,8 +69,12 @@ function NoticesTab() {
             </Pressable>
             <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
               <Btn small kind="ghost" style={{ flex: 1 }} title="PDF শেয়ার" onPress={() => sharePdfOf(n)} />
+              {Platform.OS === 'android' && (
+                <Btn small kind="ghost" style={{ flex: 1 }} title="ফোনে সেভ" onPress={() => savePdfOf(n)} />
+              )}
               <Btn small kind="ghost" style={{ flex: 1 }} title="মেসেজ পাঠান" onPress={() => shareText(n)} />
             </View>
+            <Btn small style={{ marginTop: 8 }} title="সব ভাড়াটিয়াকে SMS" onPress={() => smsAll(n)} />
           </Card>
         ))
       )}
@@ -99,6 +124,13 @@ function RulesTab() {
       fail(e);
     }
   };
+  const savePdfRules = async () => {
+    try {
+      saved(await savePdf(rulesHtml(building.name, rules), { ...A4, title: 'বাসার নিয়মাবলি', fileName: 'rules' }));
+    } catch (e) {
+      fail(e);
+    }
+  };
   const shareText = () =>
     Share.share({
       message:
@@ -140,6 +172,9 @@ function RulesTab() {
       {rules.length > 0 && (
         <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
           <Btn small kind="ghost" style={{ flex: 1 }} title="PDF শেয়ার" onPress={sharePdfRules} />
+          {Platform.OS === 'android' && (
+            <Btn small kind="ghost" style={{ flex: 1 }} title="ফোনে সেভ" onPress={savePdfRules} />
+          )}
           <Btn small kind="ghost" style={{ flex: 1 }} title="মেসেজ পাঠান" onPress={shareText} />
         </View>
       )}

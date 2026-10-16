@@ -1,3 +1,5 @@
+import { Platform } from 'react-native';
+
 const BN = ['০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯'];
 
 export const MONTHS = [
@@ -48,8 +50,33 @@ export const todayISO = () => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 };
 
-export const isISODate = (s) =>
-  /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(new Date(s).getTime());
+export const isISODate = (s) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m) return false;
+  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+  const dt = new Date(y, mo - 1, d);
+  return dt.getFullYear() === y && dt.getMonth() === mo - 1 && dt.getDate() === d;
+};
+
+// sms: link for one or many numbers (Android uses ?body=, iOS uses &body=).
+export const smsUrl = (phones, body) =>
+  `sms:${[].concat(phones).map((p) => fromBn(p).replace(/[^\d+]/g, '')).join(',')}${
+    Platform.OS === 'ios' ? '&' : '?'
+  }body=${encodeURIComponent(body)}`;
+
+// Light hash for the app-lock PIN (cyrb53). It only keeps the PIN from being stored as plain text.
+export const hashPin = (pin) => {
+  const str = 'bari:' + String(pin);
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return String(4294967296 * (2097151 & h2) + (h1 >>> 0));
+};
 
 export const showDate = (iso) => {
   if (!iso) return '';
@@ -77,3 +104,28 @@ export const typeLabel = (key) =>
 
 // Unit name suffixes used in Bangladesh: ৩এ, ৩বি ...
 export const UNIT_LETTERS = ['এ', 'বি', 'সি', 'ডি', 'ই', 'এফ', 'জি', 'এইচ'];
+
+// Whole days from an ISO date/datetime string to today. null if missing/invalid.
+export const daysSince = (iso) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || '');
+  if (!m) return null;
+  const a = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const t = new Date();
+  const b = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+  return Math.round((b - a) / 86400000);
+};
+
+export const BILL_TYPES = [
+  { key: 'electric', label: 'বিদ্যুৎ', meter: true },
+  { key: 'gas', label: 'গ্যাস', meter: false },
+  { key: 'water', label: 'পানি', meter: false },
+  { key: 'other', label: 'অন্যান্য', meter: false },
+];
+export const billTypeLabel = (key) => (BILL_TYPES.find((t) => t.key === key) || BILL_TYPES[3]).label;
+
+// Meter bill = (current - previous) x rate. Never negative; rounded to paisa.
+export const meterAmount = (prev, curr, rate) =>
+  Math.round(Math.max(0, curr - prev) * rate * 100) / 100;
+
+// Bangla number that keeps decimals (taka() rounds).
+export const num = (n) => toBn(String(Math.round((Number(n) || 0) * 100) / 100));

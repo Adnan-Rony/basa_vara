@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Alert } from 'react-native';
+import { Alert } from '../i18n';
 import Screen from '../Screen';
 import { Btn, Field, useNav } from '../ui';
 import { deleteBuilding, getBuilding, saveBuilding } from '../db';

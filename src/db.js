@@ -1,9 +1,28 @@
 import * as SQLite from 'expo-sqlite';
-import { todayISO } from './utils';
+import { monthKey, shiftMonth, todayISO } from './utils';
 
 const db = SQLite.openDatabaseSync('barivara.db');
 
+const cols = (table) => db.getAllSync(`PRAGMA table_info(${table})`).map((c) => c.name);
+
+// Older installs may have tables created by an earlier version (CREATE TABLE IF NOT EXISTS won't fix them).
+function migrate() {
+  // utility_bills is a new feature: an old/partial table without `month` is unusable, so rebuild it.
+  const ub = cols('utility_bills');
+  if (ub.length && !ub.includes('month')) db.execSync('DROP TABLE utility_bills');
+  const add = (table, col, def) => {
+    const c = cols(table);
+    if (c.length && !c.includes(col)) db.execSync(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+  };
+  add('payments', 'month', "TEXT NOT NULL DEFAULT ''");
+  add('payment_log', 'month', "TEXT NOT NULL DEFAULT ''");
+  add('payments', 'paid_date', 'TEXT');
+  add('expenses', 'expense_date', "TEXT NOT NULL DEFAULT ''");
+  add('expenses', 'note', "TEXT DEFAULT ''");
+}
+
 export function initDb() {
+  migrate();
   db.execSync(`
     PRAGMA foreign_keys = ON;
     CREATE TABLE IF NOT EXISTS buildings (
@@ -47,6 +66,19 @@ export function initDb() {
       month TEXT NOT NULL,
       amount REAL NOT NULL,
       paid_date TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS utility_bills (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      unit_id INTEGER NOT NULL REFERENCES units(id) ON DELETE CASCADE,
+      tenant_id INTEGER,
+      month TEXT NOT NULL,
+      type TEXT NOT NULL,
+      prev_reading REAL,
+      curr_reading REAL,
+      rate REAL,
+      amount REAL NOT NULL DEFAULT 0,
+      paid INTEGER NOT NULL DEFAULT 0,
+      UNIQUE (unit_id, month, type)
     );
     CREATE TABLE IF NOT EXISTS expenses (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,8 +150,31 @@ export function getUnits(buildingId) {
 
 export const getUnit = (id) => db.getFirstSync('SELECT * FROM units WHERE id = ?', [id]);
 
+// Before a unit's rent changes, pin the OLD amount onto earlier months that have no payment row yet,
+// so past months keep the rent that applied back then (the change only affects this month onward).
+function freezePastRent(unitId, oldDue) {
+  const thisMonth = monthKey();
+  const tenants = db.getAllSync('SELECT id, move_in, move_out FROM tenants WHERE unit_id = ?', [unitId]);
+  for (const t of tenants) {
+    if (!t.move_in) continue;
+    let m = substr7(t.move_in);
+    const cap = shiftMonth(thisMonth, -36);
+    if (m < cap) m = cap;
+    const last = t.move_out && substr7(t.move_out) < thisMonth ? substr7(t.move_out) : shiftMonth(thisMonth, -1);
+    for (; m <= last; m = shiftMonth(m, 1)) {
+      const has = db.getFirstSync('SELECT id FROM payments WHERE tenant_id = ? AND month = ?', [t.id, m]);
+      if (!has) db.runSync('INSERT INTO payments (tenant_id, month, due, paid) VALUES (?, ?, ?, 0)', [t.id, m, oldDue]);
+    }
+  }
+}
+const substr7 = (iso) => String(iso).slice(0, 7);
+
 export function saveUnit({ id, buildingId, name, rent, serviceCharge, note }) {
   if (id) {
+    const old = db.getFirstSync('SELECT rent, service_charge FROM units WHERE id = ?', [id]);
+    if (old && (old.rent !== rent || old.service_charge !== serviceCharge)) {
+      db.withTransactionSync(() => freezePastRent(id, old.rent + old.service_charge));
+    }
     db.runSync(
       'UPDATE units SET name = ?, rent = ?, service_charge = ?, note = ? WHERE id = ?',
       [name, rent, serviceCharge, note, id]
@@ -183,7 +238,7 @@ export const getTenantPayments = (tenantId) =>
 // One row per tenant who was living in the building during `month`.
 export function getRentRows(month) {
   const rows = db.getAllSync(
-    `SELECT t.id AS tenant_id, t.name, t.phone, t.members,
+    `SELECT t.id AS tenant_id, t.name, t.phone, t.members, t.move_in, t.active,
             u.id AS unit_id, u.name AS unit_name, b.name AS building_name,
             COALESCE(p.due, u.rent + u.service_charge) AS due,
             COALESCE(p.paid, 0) AS paid
@@ -207,27 +262,35 @@ export function addPayment(tenantId, month, defaultDue, amount) {
   return logId;
 }
 
+// Adds `amount` to a month. Anything above that month's due is carried into the next month(s) as advance.
 function addPaymentInner(tenantId, month, defaultDue, amount) {
-  const row = db.getFirstSync('SELECT * FROM payments WHERE tenant_id = ? AND month = ?', [
-    tenantId,
-    month,
-  ]);
-  if (row) {
-    db.runSync('UPDATE payments SET paid = paid + ?, paid_date = ? WHERE id = ?', [
-      amount,
-      todayISO(),
-      row.id,
-    ]);
-  } else {
-    db.runSync(
-      'INSERT INTO payments (tenant_id, month, due, paid, paid_date) VALUES (?, ?, ?, ?, ?)',
-      [tenantId, month, defaultDue, amount, todayISO()]
-    );
-  }
+  applyPayment(tenantId, month, defaultDue, amount, 0);
   return db.runSync(
     'INSERT INTO payment_log (tenant_id, month, amount, paid_date) VALUES (?, ?, ?, ?)',
     [tenantId, month, amount, todayISO()]
   ).lastInsertRowId;
+}
+
+function applyPayment(tenantId, month, defaultDue, amount, depth) {
+  const row = db.getFirstSync('SELECT * FROM payments WHERE tenant_id = ? AND month = ?', [tenantId, month]);
+  const due = row ? row.due : defaultDue;
+  const total = (row ? row.paid : 0) + amount;
+  const carry = due > 0 && total > due && depth < 24;
+  const keep = carry ? due : total;
+  if (row) {
+    db.runSync('UPDATE payments SET paid = ?, paid_date = ? WHERE id = ?', [keep, todayISO(), row.id]);
+  } else {
+    db.runSync('INSERT INTO payments (tenant_id, month, due, paid, paid_date) VALUES (?, ?, ?, ?, ?)', [
+      tenantId, month, defaultDue, keep, todayISO(),
+    ]);
+  }
+  if (carry) {
+    const u = db.getFirstSync(
+      'SELECT u.rent + u.service_charge AS due FROM tenants t JOIN units u ON u.id = t.unit_id WHERE t.id = ?',
+      [tenantId]
+    );
+    applyPayment(tenantId, shiftMonth(month, 1), u?.due ?? due, total - due, depth + 1);
+  }
 }
 
 export function resetPayment(tenantId, month) {
@@ -262,17 +325,56 @@ export function getReceiptData(logId) {
     [log.tenant_id, log.month, logId]
   ).s;
   const due = info.due ?? 0;
+  const totalPaid = due > 0 ? Math.min(upTo, due) : upTo;
   return {
     ...info,
     receiptNo: log.id,
     month: log.month,
     amount: log.amount,
     paidDate: log.paid_date,
-    totalPaid: upTo,
+    totalPaid,
+    carried: Math.max(0, upTo - due),
     due,
     remaining: Math.max(0, due - upTo),
   };
 }
+
+// ---------- Arrears (all months) ----------
+// Every tenant who still owes something, with the unpaid months (last 36 months, up to this month).
+export function getArrears() {
+  const cur = monthKey();
+  const first = db.getFirstSync(
+    'SELECT MIN(substr(move_in, 1, 7)) AS m FROM tenants WHERE move_in IS NOT NULL'
+  )?.m;
+  let start = first || cur;
+  const cap = shiftMonth(cur, -35);
+  if (start < cap) start = cap;
+  const map = new Map();
+  for (let m = start; m <= cur; m = shiftMonth(m, 1)) {
+    for (const r of getRentRows(m)) {
+      if (r.remaining <= 0) continue;
+      if (!r.move_in && m < cur) continue; // no move-in date: only count this month
+      const e = map.get(r.tenant_id) || {
+        tenant_id: r.tenant_id, name: r.name, phone: r.phone, unit_name: r.unit_name,
+        building_name: r.building_name, active: r.active, months: [], total: 0,
+      };
+      e.months.push({ month: m, remaining: r.remaining });
+      e.total += r.remaining;
+      map.set(r.tenant_id, e);
+    }
+  }
+  return [...map.values()].sort((a, b) => b.total - a.total);
+}
+
+// Phone numbers of current tenants (one building, or all when buildingId is null).
+export const getTenantPhones = (buildingId = null) =>
+  db
+    .getAllSync(
+      `SELECT t.phone FROM tenants t JOIN units u ON u.id = t.unit_id
+       WHERE t.active = 1 AND t.phone IS NOT NULL AND t.phone != '' ${buildingId ? 'AND u.building_id = ?' : ''}`,
+      buildingId ? [buildingId] : []
+    )
+    .map((r) => r.phone);
 
 // ---------- Settings ----------
 export function getSettings() {
@@ -340,8 +442,20 @@ export const deleteRule = (id) => db.runSync('DELETE FROM rules WHERE id = ?', [
 
 
 // ---------- Simple Expense Manager ----------
-export const getExpenses = () =>
-  db.getAllSync('SELECT * FROM expenses ORDER BY expense_date DESC, id DESC');
+// month = 'YYYY-MM' to see one month only; omit for every expense.
+export const getExpenses = (month = null) =>
+  month
+    ? db.getAllSync(
+        'SELECT * FROM expenses WHERE substr(expense_date, 1, 7) = ? ORDER BY expense_date DESC, id DESC',
+        [month]
+      )
+    : db.getAllSync('SELECT * FROM expenses ORDER BY expense_date DESC, id DESC');
+
+export const updateExpense = ({ id, title, amount, category, expenseDate, note }) =>
+  db.runSync(
+    'UPDATE expenses SET title = ?, amount = ?, category = ?, expense_date = ?, note = ? WHERE id = ?',
+    [title, amount, category || 'অন্যান্য', expenseDate, note || '', id]
+  );
 
 export const addExpense = ({ title, amount, category, expenseDate, note }) =>
   db.runSync(
@@ -350,6 +464,36 @@ export const addExpense = ({ title, amount, category, expenseDate, note }) =>
   ).lastInsertRowId;
 
 export const deleteExpense = (id) => db.runSync('DELETE FROM expenses WHERE id = ?', [id]);
+
+// ---------- Utility bills (meter reading / fixed) ----------
+export const getBills = (month) =>
+  db.getAllSync('SELECT * FROM utility_bills WHERE month = ? ORDER BY id', [month]);
+
+// Last meter reading from an earlier month for this unit + bill type (prefills "previous").
+export const getLastReading = (unitId, type, month) =>
+  db.getFirstSync(
+    `SELECT curr_reading FROM utility_bills
+     WHERE unit_id = ? AND type = ? AND month < ? AND curr_reading IS NOT NULL
+     ORDER BY month DESC LIMIT 1`,
+    [unitId, type, month]
+  )?.curr_reading ?? null;
+
+// One bill per unit + month + type. Saving again edits it and keeps the paid flag.
+export function saveBill({ unitId, tenantId, month, type, prev, curr, rate, amount }) {
+  db.runSync(
+    `INSERT INTO utility_bills (unit_id, tenant_id, month, type, prev_reading, curr_reading, rate, amount)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(unit_id, month, type) DO UPDATE SET
+       tenant_id = excluded.tenant_id, prev_reading = excluded.prev_reading,
+       curr_reading = excluded.curr_reading, rate = excluded.rate, amount = excluded.amount`,
+    [unitId, tenantId, month, type, prev, curr, rate, amount]
+  );
+}
+
+export const setBillPaid = (id, paid) =>
+  db.runSync('UPDATE utility_bills SET paid = ? WHERE id = ?', [paid ? 1 : 0, id]);
+
+export const deleteBill = (id) => db.runSync('DELETE FROM utility_bills WHERE id = ?', [id]);
 
 // ---------- Backup & Restore ----------
 // Keep this list in dependency order (parents before children).
@@ -360,10 +504,12 @@ const BACKUP_TABLES = [
   'tenants',
   'payments',
   'payment_log',
+  'utility_bills',
   'settings',
   'notices',
   'rules',
 ];
+const OPTIONAL_BACKUP_TABLES = ['expenses', 'utility_bills'];
 const BACKUP_FORMAT = 'barivara-sqlite-backup';
 const BACKUP_VERSION = 1;
 
@@ -372,6 +518,7 @@ export function createBackupObject() {
   for (const table of BACKUP_TABLES) {
     // Table names come only from the constant allowlist above.
     tables[table] = db.getAllSync(`SELECT * FROM "${table}"`);
+    if (table === 'settings') tables[table] = tables[table].filter((r) => r.key !== 'pin_hash');
   }
   return {
     format: BACKUP_FORMAT,
@@ -397,8 +544,8 @@ export function validateBackupObject(backup) {
   }
 
   for (const table of BACKUP_TABLES) {
-    // Older version-1 backups did not include expenses; treat those as empty.
-    if (table === 'expenses' && backup.tables[table] === undefined) continue;
+    // Older version-1 backups did not include these tables; treat them as empty.
+    if (OPTIONAL_BACKUP_TABLES.includes(table) && backup.tables[table] === undefined) continue;
     if (!Array.isArray(backup.tables[table])) {
       throw new Error(`ব্যাকআপে ${table} টেবিলের তথ্য নেই বা ভুল।`);
     }
@@ -421,6 +568,7 @@ export function restoreBackupObject(backup) {
   validateBackupObject(backup);
 
   const deleteOrder = [...BACKUP_TABLES].reverse();
+  const keepPin = db.getFirstSync("SELECT value FROM settings WHERE key = 'pin_hash'");
   db.withTransactionSync(() => {
     // Delete child records first so foreign-key constraints remain satisfied.
     for (const table of deleteOrder) db.runSync(`DELETE FROM "${table}"`);
@@ -443,12 +591,25 @@ export function restoreBackupObject(backup) {
       }
     }
 
+    if (keepPin) {
+      db.runSync(
+        "INSERT INTO settings (key, value) VALUES ('pin_hash', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [keepPin.value]
+      );
+    }
     const fkErrors = db.getAllSync('PRAGMA foreign_key_check');
     if (fkErrors.length) {
       throw new Error('ব্যাকআপে অসম্পূর্ণ সম্পর্ক আছে। বর্তমান ডেটা পরিবর্তন করা হয়নি।');
     }
   });
   return true;
+}
+
+// Wipes everything (used only by "forgot PIN → reset").
+export function resetAllData() {
+  db.withTransactionSync(() => {
+    for (const table of [...BACKUP_TABLES].reverse()) db.runSync(`DELETE FROM "${table}"`);
+  });
 }
 
 // ---------- Dashboard ----------

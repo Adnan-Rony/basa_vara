@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { Alert, View } from 'react-native';
+import { View } from 'react-native';
+import { Alert } from '../i18n';
 import Screen from '../Screen';
 import { Btn, Chip, Field, useNav } from '../ui';
 import { getTenant, saveTenant } from '../db';

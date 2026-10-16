@@ -24,7 +24,14 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-sharing"
-    ]
+      "expo-sharing",
+      "expo-notifications"
+    ],
+    "backgroundColor": "#0A5C55",
+    "extra": {
+      "eas": {
+        "projectId": "4ff74374-09f9-40dd-8779-fa3a9dbc201b"
+      }
+    }
   }
 }

@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Alert, Text } from 'react-native';
+import { Alert, Text } from '../i18n';
 import Screen from '../Screen';
 import { Btn, Card, Field, useNav } from '../ui';
 import { addUnitsBulk } from '../db';

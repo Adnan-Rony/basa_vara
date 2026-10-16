@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
-import { Alert, Linking, Text, View } from 'react-native';
+import { Linking, View } from 'react-native';
+import { Alert, Text } from '../i18n';
 import Screen from '../Screen';
 import { Badge, Btn, Card, HeaderAction, Row, SectionTitle, useNav } from '../ui';
 import { endTenancy, getActiveTenant, getPastTenants, getTenantPayments, getUnit } from '../db';

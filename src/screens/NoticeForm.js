@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
-import { Alert, View } from 'react-native';
+import { View } from 'react-native';
+import { Alert } from '../i18n';
 import Screen from '../Screen';
 import { Btn, Chip, Field, SectionTitle, useNav } from '../ui';
 import { deleteNotice, getBuildings, getNotice, saveNotice } from '../db';
